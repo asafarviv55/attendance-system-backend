@@ -291,6 +291,33 @@ app.post('/api/attendance/clockin', [verifyToken, auditLogMiddleware('clockin')]
 });
 
 
+app.post('/bulk-import', [verifyToken, isAdmin], upload.single('file'), async (req, res) => {
+  const results = [];
+
+  fs.createReadStream(req.file.path)
+    .pipe(csv())
+    .on('data', (data) => results.push(data))
+    .on('end', async () => {
+      try {
+        for (const user of results) {
+          const { email, password, role } = user;
+          const [roleResult] = await pool.query('SELECT id FROM roles WHERE role_name = ?', [role]);
+          if (roleResult.length === 0) {
+            return res.status(400).json({ success: false, message: `Invalid role: ${role}` });
+          }
+          const roleId = roleResult[0].id;
+          const hashedPassword = bcrypt.hashSync(password, 8);
+          await pool.query('INSERT INTO users (email, password, role_id) VALUES (?, ?, ?)', [email, hashedPassword, roleId]);
+        }
+        fs.unlinkSync(req.file.path); // Remove the uploaded file
+        res.json({ success: true, message: 'Users imported successfully' });
+      } catch (err) {
+        console.error('Database error:', err);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+      }
+    });
+});
+
 
 
 
