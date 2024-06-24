@@ -8,6 +8,7 @@ const { verifyToken,isAdmin, isManager } = require('./middleware/auth');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto'); // Use crypto module for random bytes
 const moment = require('moment-timezone');
+const auditLogMiddleware = require('./middleware/auditLogMiddleware'); // Adjust the path to your audit log middleware
 
 
 const app = express();
@@ -216,7 +217,7 @@ app.post('/api/signin', async (req, res) => {
   console.log('Received password:', password);
 
   try {
-    const [rows] = await pool.query('SELECT users.id, users.password, users.role_id, roles.role_name FROM users JOIN roles ON users.role_id = roles.id WHERE users.email = ?', [email]);
+    const [rows] = await pool.query('SELECT users.id, users.password, users.role_id, roles.role_name, users.email FROM users JOIN roles ON users.role_id = roles.id WHERE users.email = ?', [email]);
     console.log("Database query executed");
     console.log('Query result:', rows);
 
@@ -229,7 +230,10 @@ app.post('/api/signin', async (req, res) => {
       if (isValidPassword) {
         const token = jwt.sign({ userId: user.id, roleId: user.role_id, roleName: user.role_name }, SECRET_KEY, { expiresIn: '1h' });
         console.log("Sign in successful, token generated");
-        res.json({ success: true, token, userId: user.id, roleName: user.role_name });
+        console.log("userId" , user.id );
+        console.log("userName" , user.userName );
+        console.log("roleName" , user.role_name );
+        res.json({ success: true, token, userId: user.id, userName: user.email, roleName: user.role_name });
       } else {
         console.log("Password is invalid");
         res.json({ success: false, message: 'Invalid credentials' });
@@ -248,7 +252,8 @@ app.post('/api/signin', async (req, res) => {
 
 
 // Clock In Route
-app.post('/api/attendance/clockin', verifyToken, async (req, res) => {
+app.post('/api/attendance/clockin', [verifyToken, auditLogMiddleware('clockin')], async (req, res) => {
+
   console.log('enter to clockin:');
   const { userId, latitude, longitude } = req.body;
   console.log('longitude:', longitude);
@@ -290,7 +295,7 @@ app.post('/api/attendance/clockin', verifyToken, async (req, res) => {
 
 
 // Clock Out Route
-app.post('/api/attendance/clockout', verifyToken, async (req, res) => {
+app.post('/api/attendance/clockout', [verifyToken, auditLogMiddleware('clockout')], async (req, res) => {
   const { userId, latitude, longitude } = req.body;
   if (!isAuthorizedLocation(latitude, longitude)) {
     return res.status(400).json({ success: false, message: 'Unauthorized location' });
@@ -320,6 +325,51 @@ app.post('/api/attendance/clockout', verifyToken, async (req, res) => {
   }
 });
 
+
+// Submit an attendance correction request
+app.post('/api/attendance/request-correction', [verifyToken, auditLogMiddleware('request_correction')], async (req, res) => {
+  const { userId, attendanceId, requestReason } = req.body;
+  const requestDate = moment().tz(process.env.TZ).format();
+
+  try {
+    await pool.query('INSERT INTO attendance_correction_requests (user_id, attendance_id, request_reason, request_date) VALUES (?, ?, ?, ?)', 
+    [userId, attendanceId, requestReason, requestDate]);
+    res.json({ success: true, message: 'Correction request submitted successfully' });
+  } catch (err) {
+    console.error('Database error:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// Manager: Approve or deny a correction request
+app.post('/api/attendance/respond-correction', [verifyToken, auditLogMiddleware('respond_correction')], async (req, res) => {
+  const { requestId, status, managerResponse } = req.body;
+  const responseDate = moment().tz(process.env.TZ).format();
+
+  if (!['approved', 'denied'].includes(status)) {
+    return res.status(400).json({ success: false, message: 'Invalid status' });
+  }
+
+  try {
+    await pool.query('UPDATE attendance_correction_requests SET status = ?, manager_response = ?, response_date = ? WHERE id = ?', 
+    [status, managerResponse, responseDate, requestId]);
+    res.json({ success: true, message: `Correction request ${status}` });
+  } catch (err) {
+    console.error('Database error:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// Get all correction requests for a manager
+app.get('/api/attendance/correction-requests', verifyToken, async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM attendance_correction_requests WHERE status = "pending"');
+    res.json({ success: true, requests: rows });
+  } catch (err) {
+    console.error('Database error:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
 
 
 // Route to request leave
