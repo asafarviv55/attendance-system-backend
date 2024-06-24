@@ -7,6 +7,7 @@ const bcrypt = require('bcryptjs');
 const { verifyToken,isAdmin, isManager } = require('./middleware/auth');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto'); // Use crypto module for random bytes
+const moment = require('moment-timezone');
 
 
 const app = express();
@@ -29,6 +30,9 @@ const transporter = nodemailer.createTransport({
 
 const AUTHORIZED_LOCATIONS = [
   { latitude: 37.7749, longitude: -122.4194 }, // Example: San Francisco
+  { latitude: 31.771959 , longitude: 35.217018 } ,// Example: San Francisco
+/*  { latitude: 31.747041 , longitude: 34.988099 } // Example: San Francisco*/
+
   // Add more authorized locations as needed
 ];
 
@@ -38,7 +42,7 @@ const isAuthorizedLocation = (latitude, longitude) => {
     const distance = Math.sqrt(
       Math.pow(location.latitude - latitude, 2) + Math.pow(location.longitude - longitude, 2)
     );
-    return distance < 0.01; // Adjust the range as needed
+    return distance < 10; // Adjust the range as needed
   });
 };
 
@@ -243,16 +247,36 @@ app.post('/api/signin', async (req, res) => {
 
 
 
-
 // Clock In Route
 app.post('/api/attendance/clockin', verifyToken, async (req, res) => {
+  console.log('enter to clockin:');
   const { userId, latitude, longitude } = req.body;
+  console.log('longitude:', longitude);
+  console.log('latitude:', latitude);
+
   if (!isAuthorizedLocation(latitude, longitude)) {
     return res.status(400).json({ success: false, message: 'Unauthorized location' });
   }
 
-  const timestamp = new Date();
+  // Get the current date in YYYY-MM-DD format according to the specified timezone
+  const currentDate = moment().tz(process.env.TZ).format().split('T')[0];
+  console.log('currentDate:', currentDate);
+
+  // Get the current timestamp according to the specified timezone
+  const timestamp = moment().tz(process.env.TZ).format();
+  console.log('timestamp:', timestamp);
+
   try {
+    // Check if user has already clocked in today
+    const [rows] = await pool.query(
+      'SELECT * FROM attendance WHERE user_id = ? AND DATE(clock_in) = ?',
+      [userId, currentDate]
+    );
+
+    if (rows.length > 0) {
+      return res.status(400).json({ success: false, message: 'User has already clocked in today' });
+    }
+
     await pool.query('INSERT INTO attendance (user_id, clock_in, latitude, longitude) VALUES (?, ?, ?, ?)', [userId, timestamp, latitude, longitude]);
     res.json({ success: true, message: 'Clocked in successfully' });
   } catch (err) {
@@ -261,6 +285,10 @@ app.post('/api/attendance/clockin', verifyToken, async (req, res) => {
   }
 });
 
+
+
+
+
 // Clock Out Route
 app.post('/api/attendance/clockout', verifyToken, async (req, res) => {
   const { userId, latitude, longitude } = req.body;
@@ -268,17 +296,23 @@ app.post('/api/attendance/clockout', verifyToken, async (req, res) => {
     return res.status(400).json({ success: false, message: 'Unauthorized location' });
   }
 
+  const currentDate = moment().tz(process.env.TZ).format().split('T')[0];
   const timestamp = new Date();
+
   try {
-    const [rows] = await pool.query('SELECT clock_in FROM attendance WHERE user_id = ? AND clock_out IS NULL', [userId]);
+    // Check if user has clocked in today and not clocked out yet
+    const [rows] = await pool.query(
+      'SELECT * FROM attendance WHERE user_id = ? AND DATE(clock_in) = ? AND clock_out IS NULL',
+      [userId, currentDate]
+    );
+
     if (rows.length === 0) {
-      return res.status(400).json({ success: false, message: 'No clock-in record found for user' });
+      return res.status(400).json({ success: false, message: 'No clock-in record found for today or already clocked out' });
     }
 
     const clockInTime = new Date(rows[0].clock_in);
     const totalHours = (timestamp - clockInTime) / (1000 * 60 * 60); // Convert milliseconds to hours
-    await pool.query('UPDATE attendance SET clock_out = ?, total_hours = ?, latitude = ?, longitude = ? WHERE user_id = ? AND clock_out IS NULL', [timestamp, totalHours, latitude, longitude, userId]);
-
+    await pool.query('UPDATE attendance SET clock_out = ?, total_hours = ?, latitude = ?, longitude = ? WHERE id = ?', [timestamp, totalHours, latitude, longitude, rows[0].id]);
     res.json({ success: true, message: 'Clocked out successfully', clockOutTime: timestamp, totalHours });
   } catch (err) {
     console.error('Database error:', err);
